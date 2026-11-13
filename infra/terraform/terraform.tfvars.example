@@ -1,0 +1,13 @@
+# Copie para terraform.tfvars e ajuste. O arquivo terraform.tfvars não é versionado.
+
+project_name = "studyhub"
+environment  = "dev"
+aws_region   = "us-east-1"
+
+instance_type = "t3.micro"
+
+# Chave pública usada no acesso SSH (conteúdo do arquivo .pub).
+ssh_public_key = "ssh-ed25519 AAAA... usuario@maquina"
+
+# Quem pode acessar por SSH. Prefira o seu IP: ["203.0.113.10/32"].
+allowed_ssh_cidrs = []

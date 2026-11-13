@@ -1,0 +1,21 @@
+#!/bin/bash
+# Executado uma única vez, na primeira inicialização da instância.
+# Prepara o servidor para rodar a aplicação em containers.
+set -euxo pipefail
+
+# Docker Engine
+dnf update -y
+dnf install -y docker
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# Plugin Docker Compose (disponível para todos os usuários)
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL \
+  "https://github.com/docker/compose/releases/download/${docker_compose_version}/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Diretório onde o deploy coloca o docker-compose.yml e o .env
+mkdir -p "${app_dir}"
+chown ec2-user:ec2-user "${app_dir}"

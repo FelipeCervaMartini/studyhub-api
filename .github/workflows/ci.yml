@@ -1,0 +1,168 @@
+name: CI
+
+# Integração contínua: roda a cada push na main e em todo pull request.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancela execuções antigas do mesmo branch quando chega um commit novo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Princípio do menor privilégio: o pipeline só precisa ler o código.
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, build e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Banco real para os testes de integração, descartado ao final do job.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: studyhub
+          POSTGRES_PASSWORD: studyhub
+          POSTGRES_DB: studyhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U studyhub -d studyhub_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://studyhub:studyhub@localhost:5432/studyhub_test
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verificação de tipos
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Testes unitários e de integração com cobertura
+        run: npm run test:coverage
+
+      - name: Publicar relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  docker:
+    name: Build e smoke test da imagem Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: quality
+
+    env:
+      POSTGRES_PASSWORD: senha-apenas-do-ci
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      - name: Construir a imagem e subir API + banco
+        run: docker compose up -d --build --wait --wait-timeout 120
+
+      - name: Smoke test dos health checks
+        run: |
+          curl --fail --silent --show-error http://localhost:3000/health
+          curl --fail --silent --show-error http://localhost:3000/health/ready
+
+      - name: Smoke test de escrita e leitura
+        run: |
+          curl --fail --silent --show-error -X POST http://localhost:3000/api/v1/subjects \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Smoke test"}'
+          curl --fail --silent --show-error http://localhost:3000/api/v1/subjects | grep -q 'Smoke test'
+
+      - name: Logs dos containers em caso de falha
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Derrubar o ambiente
+        if: always()
+        run: docker compose down --volumes
+
+  terraform:
+    name: Validação da infraestrutura (Terraform)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Emulador local da AWS (moto): deixa testar o apply sem conta nem custo.
+    services:
+      moto:
+        image: motoserver/moto:5.2.5
+        ports:
+          - 5000:5000
+
+    defaults:
+      run:
+        working-directory: infra/terraform
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Formatação
+        run: terraform fmt -check -recursive -diff
+
+      - name: Inicialização
+        run: terraform init -input=false
+
+      - name: Validação
+        run: terraform validate -no-color
+
+      - name: Instalar TFLint
+        uses: terraform-linters/setup-tflint@v6
+
+      - name: Lint do Terraform
+        run: |
+          tflint --init
+          tflint --format compact
+
+      # Cria toda a infraestrutura no emulador e confere que um segundo plan não tem mudanças.
+      - name: Teste de provisionamento no emulador
+        env:
+          AWS_ENDPOINT_URL: http://localhost:5000
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_REGION: us-east-1
+          TF_VAR_ssh_public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtP0vqzZp0m3J1q8mJ0c0m0m0m0m0m0m0m0m0m0m0m0 ci@teste
+          TF_VAR_allowed_ssh_cidrs: '["203.0.113.10/32"]'
+        run: |
+          terraform apply -auto-approve -input=false -no-color
+          terraform plan -input=false -no-color -detailed-exitcode
+          terraform destroy -auto-approve -input=false -no-color

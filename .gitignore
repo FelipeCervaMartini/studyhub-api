@@ -1,0 +1,27 @@
+# Dependências e build
+node_modules/
+dist/
+coverage/
+
+# Variáveis de ambiente (nunca versionar segredos)
+.env
+.env.*
+!.env.example
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Chaves
+*.pem
+*.key
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

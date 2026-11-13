@@ -1,0 +1,39 @@
+# Ambiente completo (API + banco) para desenvolvimento local e para a instância EC2.
+#   docker compose up -d --build
+# As variáveis vêm do arquivo .env (veja .env.example).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-studyhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no arquivo .env}
+      POSTGRES_DB: ${POSTGRES_DB:-studyhub}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      # Exposto apenas na máquina local, para ferramentas de desenvolvimento.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    image: studyhub-api:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-studyhub}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-studyhub}
+    ports:
+      - "${API_PORT:-3000}:3000"
+
+volumes:
+  db-data:

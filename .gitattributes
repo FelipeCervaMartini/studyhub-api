@@ -1,0 +1,2 @@
+# Garante finais de linha LF no repositório (scripts shell e Dockerfile quebram com CRLF)
+* text=auto eol=lf
