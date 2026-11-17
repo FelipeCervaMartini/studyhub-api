@@ -18,6 +18,14 @@ output "api_url" {
   value       = "http://${aws_eip.api.public_ip}:${var.app_port}"
 }
 
+output "alarm_names" {
+  description = "Alarmes do CloudWatch criados para a instância."
+  value = [
+    aws_cloudwatch_metric_alarm.cpu_high.alarm_name,
+    aws_cloudwatch_metric_alarm.status_check.alarm_name,
+  ]
+}
+
 output "ssh_command" {
   description = "Comando para acessar a instância por SSH."
   value       = "ssh ec2-user@${aws_eip.api.public_ip}"

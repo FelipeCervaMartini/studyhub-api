@@ -1,0 +1,11 @@
+# Versão pro cluster de teste (kind): usa a base e só troca a imagem do GHCR pela construída na hora.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/felipecervamartini/studyhub-api
+    newName: studyhub-api
+    newTag: ci

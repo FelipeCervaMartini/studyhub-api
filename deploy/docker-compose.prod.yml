@@ -1,0 +1,44 @@
+# Produção (EC2): parecido com o compose da raiz, mas baixa a imagem pronta do GHCR em vez de construir. Quem sobe é o deploy.sh.
+
+name: studyhub
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-studyhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no arquivo .env}
+      POSTGRES_DB: ${POSTGRES_DB:-studyhub}
+    volumes:
+      # Volume nomeado: os dados sobrevivem à troca de versão da API.
+      - db-data:/var/lib/postgresql/data
+    # Sem "ports": o banco só é acessível pela rede interna do Docker.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: &logging
+      # Limita o tamanho dos logs para não encher o disco da instância.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: ${API_IMAGE:?defina API_IMAGE com a imagem publicada pelo pipeline}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-studyhub}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-studyhub}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    logging: *logging
+
+volumes:
+  db-data:

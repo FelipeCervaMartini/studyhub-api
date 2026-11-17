@@ -8,3 +8,6 @@ infra
 .env
 .env.*
 *.md
+deploy
+k8s
+monitoring

@@ -1,0 +1,5 @@
+# Namespace próprio: separa os recursos do StudyHub do resto do cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: studyhub

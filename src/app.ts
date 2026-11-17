@@ -14,6 +14,7 @@ import { NoteService } from './modules/notes/notes.service';
 import { subjectsRouter } from './modules/subjects/subjects.controller';
 import { PgSubjectRepository } from './modules/subjects/subjects.repository';
 import { SubjectService } from './modules/subjects/subjects.service';
+import { createMetrics } from './shared/metrics';
 import { errorHandler, notFoundHandler, requestLogger } from './shared/middleware';
 
 export interface AppOptions {
@@ -33,6 +34,12 @@ export function createApp(pool: Pool, options: AppOptions = {}): Express {
   const app = express();
   app.disable('x-powered-by');
   app.use(helmet());
+
+  // Métricas para o Prometheus. A rota /metrics fica antes do middleware para não medir a si mesma.
+  const metrics = createMetrics();
+  app.get('/metrics', metrics.handler);
+  app.use(metrics.middleware);
+
   app.use(express.json({ limit: '100kb' }));
   if (options.logRequests ?? true) app.use(requestLogger);
 

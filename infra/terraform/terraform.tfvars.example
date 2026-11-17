@@ -10,4 +10,8 @@ instance_type = "t3.micro"
 ssh_public_key = "ssh-ed25519 AAAA... usuario@maquina"
 
 # Quem pode acessar por SSH. Prefira o seu IP: ["203.0.113.10/32"].
+# Pro deploy pelo GitHub Actions tem que liberar ["0.0.0.0/0"] (o GitHub não tem IP fixo); o SSH continua exigindo a chave.
 allowed_ssh_cidrs = []
+
+# Opcional: e-mail que recebe os avisos dos alarmes do CloudWatch.
+# alarm_email = "voce@exemplo.com"

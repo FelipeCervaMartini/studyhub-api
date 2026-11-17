@@ -1,0 +1,103 @@
+# API do StudyHub: configuração, pods e o endereço interno para acessá-los.
+
+# Configurações que não são segredo.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: studyhub-api
+data:
+  NODE_ENV: production
+  PORT: "3000"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studyhub-api
+spec:
+  # Duas cópias da API: se uma cair, a outra continua atendendo.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: studyhub-api
+  # Atualização sem ficar fora do ar: sobe um pod novo antes de derrubar um antigo.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: studyhub-api
+      # Avisa um Prometheus instalado no cluster de onde coletar as métricas.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: /metrics
+    spec:
+      # Espera o banco aceitar conexões antes de iniciar a API (ela roda as migrações ao subir).
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h studyhub-db -p 5432; do echo "aguardando o banco"; sleep 2; done
+      containers:
+        - name: api
+          image: ghcr.io/felipecervamartini/studyhub-api:latest
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: studyhub-api
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: studyhub-db
+                  key: password
+            # $(POSTGRES_PASSWORD) é trocado pelo valor da variável definida acima.
+            - name: DATABASE_URL
+              value: postgres://studyhub:$(POSTGRES_PASSWORD)@studyhub-db:5432/studyhub
+          # Só recebe requisições quando a API e o banco estão respondendo.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          # Se a API travar, o Kubernetes reinicia o container.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Mesmo cuidado da imagem Docker: sem root e sem permissões extras.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Endereço fixo dentro do cluster, que distribui as requisições entre os pods da API.
+apiVersion: v1
+kind: Service
+metadata:
+  name: studyhub-api
+spec:
+  selector:
+    app: studyhub-api
+  ports:
+    - port: 80
+      targetPort: 3000

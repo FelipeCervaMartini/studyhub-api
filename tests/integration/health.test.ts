@@ -12,6 +12,11 @@ describe('Health checks', () => {
     expect(response.body.status).toBe('ok');
   });
 
+  it('GET /health informa a versão em execução', async () => {
+    const response = await request(ctx.app).get('/health').expect(200);
+    expect(response.body.version).toBe(process.env.APP_VERSION ?? 'dev');
+  });
+
   it('GET /health/ready responde 200 quando o banco está acessível', async () => {
     const response = await request(ctx.app).get('/health/ready').expect(200);
     expect(response.body).toEqual({ status: 'ready', database: 'up' });

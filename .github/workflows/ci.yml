@@ -1,22 +1,24 @@
-name: CI
+name: CI/CD
 
-# Integração contínua: roda a cada push na main e em todo pull request.
+# CI em todo push e pull request; na main, se tudo passar, também publica a imagem e faz o deploy (CD).
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
-# Cancela execuções antigas do mesmo branch quando chega um commit novo.
+# Cancela a execução antiga quando chega commit novo, menos na main (para não cortar um deploy no meio).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Princípio do menor privilégio: o pipeline só precisa ler o código.
+# Princípio do menor privilégio: por padrão o pipeline só lê o código.
 permissions:
   contents: read
 
 jobs:
+  # ============================ Integração contínua ============================
+
   quality:
     name: Lint, build e testes
     runs-on: ubuntu-latest
@@ -54,6 +56,10 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
+      # Segurança: falha se alguma dependência de produção tiver vulnerabilidade alta ou crítica.
+      - name: Auditoria de segurança das dependências
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint
         run: npm run lint
 
@@ -76,7 +82,7 @@ jobs:
           retention-days: 7
 
   docker:
-    name: Build e smoke test da imagem Docker
+    name: Build, smoke test e varredura da imagem Docker
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: quality
@@ -103,6 +109,23 @@ jobs:
             -d '{"name":"Smoke test"}'
           curl --fail --silent --show-error http://localhost:3000/api/v1/subjects | grep -q 'Smoke test'
 
+      # Monitoramento: a API precisa expor as métricas e a configuração do Prometheus precisa ser válida.
+      - name: Smoke test das métricas
+        run: curl --fail --silent --show-error http://localhost:3000/metrics | grep -q 'http_request_duration_seconds_count'
+
+      - name: Validar a configuração do Prometheus
+        run: |
+          docker run --rm -v "$PWD/monitoring:/etc/prometheus:ro" --entrypoint promtool \
+            prom/prometheus:v3.16.0 check config /etc/prometheus/prometheus.yml
+
+      # Segurança: procura vulnerabilidades conhecidas no sistema e nas bibliotecas da imagem.
+      - name: Varredura de vulnerabilidades da imagem (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            ghcr.io/aquasecurity/trivy:0.76.2 image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            studyhub-api:local
+
       - name: Logs dos containers em caso de falha
         if: failure()
         run: docker compose logs --no-color
@@ -111,15 +134,67 @@ jobs:
         if: always()
         run: docker compose down --volumes
 
+  kubernetes:
+    name: Teste dos manifests no Kubernetes (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: quality
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      - name: Construir a imagem
+        run: docker build -t studyhub-api:ci .
+
+      # kind = Kubernetes dentro do Docker: um cluster de verdade, criado só para este teste.
+      - name: Criar o cluster de teste
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: studyhub
+
+      - name: Carregar a imagem no cluster
+        run: kind load docker-image studyhub-api:ci --name studyhub
+
+      - name: Aplicar os manifests
+        run: |
+          kubectl apply -f k8s/base/namespace.yaml
+          kubectl -n studyhub create secret generic studyhub-db --from-literal=password=senha-apenas-do-ci
+          kubectl apply -k k8s/overlays/kind
+
+      - name: Esperar o banco e a API ficarem prontos
+        run: |
+          kubectl -n studyhub rollout status statefulset/studyhub-db --timeout=120s
+          kubectl -n studyhub rollout status deployment/studyhub-api --timeout=180s
+          kubectl -n studyhub get pods -o wide
+
+      - name: Smoke test pela rede do cluster
+        run: |
+          kubectl -n studyhub port-forward service/studyhub-api 8080:80 &
+          sleep 3
+          curl --fail --silent --show-error --retry 5 --retry-connrefused http://localhost:8080/health/ready
+          curl --fail --silent --show-error -X POST http://localhost:8080/api/v1/subjects \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Smoke test no Kubernetes"}'
+          curl --fail --silent --show-error http://localhost:8080/api/v1/subjects | grep -q 'Smoke test no Kubernetes'
+
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: |
+          kubectl -n studyhub get all
+          kubectl -n studyhub describe pods
+          kubectl -n studyhub logs --all-containers --prefix --tail 50 -l app=studyhub-api
+
   terraform:
     name: Validação da infraestrutura (Terraform)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     # Emulador local da AWS (moto): deixa testar o apply sem conta nem custo.
+    # Fixado pelo identificador da imagem: é a primeira versão que emula os alarmes do CloudWatch.
     services:
       moto:
-        image: motoserver/moto:5.2.5
+        image: motoserver/moto@sha256:4ec079cbae737fa957efb6b17732bc4e9cdf33942e947ad70e5696694fca3e5e
         ports:
           - 5000:5000
 
@@ -166,3 +241,136 @@ jobs:
           terraform apply -auto-approve -input=false -no-color
           terraform plan -input=false -no-color -detailed-exitcode
           terraform destroy -auto-approve -input=false -no-color
+
+  # ============================= Entrega contínua ==============================
+
+  publish:
+    name: Publicação da imagem (GHCR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Só publica o que passou por todas as verificações, e só a partir da main.
+    needs: [quality, docker, kubernetes, terraform]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.nome.outputs.image }}
+      version: ${{ steps.nome.outputs.version }}
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      # Cada commit vira uma imagem com tag própria (sha-abc1234), o que permite voltar de versão.
+      - name: Definir o nome da imagem
+        id: nome
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="sha-${GITHUB_SHA::7}"
+          {
+            echo "repo=${repo}"
+            echo "version=${version}"
+            echo "image=${repo}:${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      # O token é criado pelo próprio GitHub para esta execução e expira no final dela.
+      - name: Login no registro de imagens do GitHub
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Construir a imagem
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${{ steps.nome.outputs.version }} \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            -t ${{ steps.nome.outputs.image }} \
+            -t ${{ steps.nome.outputs.repo }}:latest \
+            .
+
+      - name: Publicar a imagem
+        run: |
+          docker push ${{ steps.nome.outputs.image }}
+          docker push ${{ steps.nome.outputs.repo }}:latest
+          echo "Imagem publicada: \`${{ steps.nome.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy na AWS (EC2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: publish
+    # Só roda quando o endereço do servidor está configurado em Settings > Variables (DEPLOY_HOST).
+    if: vars.DEPLOY_HOST != ''
+
+    environment:
+      name: production
+      url: http://${{ vars.DEPLOY_HOST }}:3000/health
+
+    # Um deploy por vez.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      HOST: ${{ vars.DEPLOY_HOST }}
+      SSH_USER: ec2-user
+      APP_DIR: /opt/studyhub
+      IMAGE: ${{ needs.publish.outputs.image }}
+      VERSION: ${{ needs.publish.outputs.version }}
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      # A chave privada fica em Settings > Secrets (DEPLOY_SSH_KEY), nunca no código.
+      - name: Configurar o acesso SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          printf 'Host servidor\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/deploy_key\n' "$HOST" "$SSH_USER" >> ~/.ssh/config
+
+      - name: Enviar os arquivos de deploy para o servidor
+        run: scp deploy/docker-compose.prod.yml deploy/deploy.sh "servidor:$APP_DIR/"
+
+      # O servidor entra no registro só durante o deploy, com o token temporário desta execução.
+      - name: Executar o deploy
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # shellcheck disable=SC2029 # as variáveis são trocadas aqui no runner antes de ir pro servidor, é de propósito
+          echo "$GHCR_TOKEN" | ssh servidor "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
+          # shellcheck disable=SC2029
+          ssh servidor "bash $APP_DIR/deploy.sh '$IMAGE'"
+
+      - name: Sair do registro no servidor
+        if: always()
+        run: ssh servidor "docker logout ghcr.io" || true
+
+      # Exemplo de uso: chama a API publicada pela internet e confere se a versão nova está no ar.
+      - name: Teste da API em produção
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors "http://$HOST:3000/health" | tee health.json
+          grep -q "\"version\":\"$VERSION\"" health.json
+          curl --fail --silent --show-error "http://$HOST:3000/health/ready"
+          curl --fail --silent --show-error -o /dev/null -w 'GET /api/v1/subjects -> %{http_code}\n' "http://$HOST:3000/api/v1/subjects"
+
+      - name: Resumo do deploy
+        run: |
+          {
+            echo "### Deploy concluído"
+            echo "- Versão: \`$VERSION\`"
+            echo "- Imagem: \`$IMAGE\`"
+            echo "- API: http://$HOST:3000/health"
+          } >> "$GITHUB_STEP_SUMMARY"

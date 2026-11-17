@@ -1,0 +1,73 @@
+# Banco PostgreSQL. A senha vem do Secret "studyhub-db", que é criado por comando e não fica no repositório.
+
+# Service interno: dá ao banco o nome fixo "studyhub-db" dentro do cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: studyhub-db
+spec:
+  clusterIP: None
+  selector:
+    app: studyhub-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# StatefulSet (e não Deployment) porque o banco guarda dados: o pod volta com o mesmo nome e o mesmo disco.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: studyhub-db
+spec:
+  serviceName: studyhub-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: studyhub-db
+  template:
+    metadata:
+      labels:
+        app: studyhub-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: studyhub
+            - name: POSTGRES_DB
+              value: studyhub
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: studyhub-db
+                  key: password
+            # Subpasta dentro do volume, exigência do PostgreSQL quando o disco vem montado.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "studyhub", "-d", "studyhub"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  # Pede um disco persistente de 1 GB para os dados do banco.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

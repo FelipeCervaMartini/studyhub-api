@@ -1,0 +1,37 @@
+# Alertas do Prometheus. Aparecem na aba "Alerts" (http://localhost:9090/alerts).
+
+groups:
+  - name: studyhub-api
+    rules:
+      # O Prometheus não consegue coletar as métricas: a API caiu ou travou.
+      - alert: ApiForaDoAr
+        expr: up{job="studyhub-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A API do StudyHub está fora do ar
+          description: O Prometheus não consegue acessar a API há mais de 1 minuto.
+
+      # Mais de 5% das requisições terminando em erro interno (status 5xx).
+      - alert: TaxaDeErrosAlta
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status_code=~"5.."}[5m]))
+            / sum(rate(http_request_duration_seconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Muitas requisições com erro 5xx
+          description: Mais de 5% das requisições falharam nos últimos 5 minutos.
+
+      # 95% das requisições deveriam responder em menos de meio segundo.
+      - alert: RespostaLenta
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A API está respondendo devagar
+          description: O tempo de resposta (p95) passou de 500 ms nos últimos 5 minutos.

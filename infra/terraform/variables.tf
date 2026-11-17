@@ -108,3 +108,22 @@ variable "docker_compose_version" {
   type        = string
   default     = "v5.7.1"
 }
+
+# ---------- Monitoramento ----------
+
+variable "cpu_alarm_threshold" {
+  description = "Percentual de uso de CPU que dispara o alarme do CloudWatch."
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.cpu_alarm_threshold > 0 && var.cpu_alarm_threshold <= 100
+    error_message = "cpu_alarm_threshold deve estar entre 1 e 100."
+  }
+}
+
+variable "alarm_email" {
+  description = "E-mail que recebe os avisos dos alarmes. Quando nulo, os alarmes são criados sem notificação."
+  type        = string
+  default     = null
+}
